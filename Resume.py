@@ -7,7 +7,7 @@ import re
 # Setup OpenAI client for OpenRouter
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key="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",  # Replace with your API key or use os.getenv
+    api_key=st.secrets['API_KEY'],  # Replace with your API key or use os.getenv
 )
 
 # Function to extract text from PDF or DOCX
