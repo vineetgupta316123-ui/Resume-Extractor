@@ -54,7 +54,7 @@ if uploaded_file is not None:
                     "HTTP-Referer": "<YOUR_SITE_URL>",  # Optional
                     "X-Title": "<YOUR_SITE_NAME>",     # Optional
                 },
-                model="qwen/qwen-2.5-72b-instruct:free",
+                model="qwen-2.5-72b-instruct:free",
                 messages=[
                     {
                         "role": "user",
