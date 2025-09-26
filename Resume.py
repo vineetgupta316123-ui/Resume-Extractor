@@ -42,6 +42,10 @@ if uploaded_file is not None:
             2. Return only valid JSON. Do NOT use markdown (no triple backticks), comments, or extra explanation — just the pure JSON object.
             3. If the industry or department is not explicitly mentioned, infer them from company names or job titles where appropriate.
             4. Leave missing fields as null or empty arrays ([]).
+            5. If no text found then don’t provide dummy data.
+
+    
+
 
         Resume Text:
         {resume_text}
