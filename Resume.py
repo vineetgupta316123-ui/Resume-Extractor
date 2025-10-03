@@ -9,6 +9,68 @@ from dateutil.relativedelta import relativedelta
 import dateutil.parser as date_parser
 import calendar
 
+import calendar
+
+# >>> Add helpers here (Part 1) <<<
+def extract_json_block(text: str):
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1]
+    return None
+
+def strip_trailing_commas(s: str) -> str:
+    out, in_str, esc = [], False, False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < len(s) and s[j] in " \t\r\n":
+                j += 1
+            if j < len(s) and s[j] in "}]" :
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 # Setup OpenAI client for OpenRouter
 api_key = st.secrets['API_KEY']
 if not api_key:
@@ -91,6 +153,59 @@ def format_experience(decimal_years):
     months = int((decimal_years - years) * 12)
     return f"{years} years {months} months"
 
+# Function to refine skills to 1-3 words per entry
+def refine_skills(skills_list):
+    trailing_stops = {"and", "of", "in", "to", "with", "at", "for", "on", "by", "the", "&"}
+    leading_phrases = [
+        "ability to", "knowledge of", "proven", "excellent", "strong",
+        "sound", "high", "good", "demonstrated", "extensive", "solid"
+    ]
+
+    def preserve_acronyms(s: str) -> str:
+        acronyms = {"ai", "ml", "nlp", "sql", "crm", "sap", "aws", "gcp", "api", "ui", "ux", "etl", "bi"}
+        def fix_token(t):
+            return t.upper() if t.lower() in acronyms else t.capitalize()
+        return " ".join(fix_token(t) for t in s.split())
+
+    cleaned = []
+    for raw in skills_list or []:
+        if not raw:
+            continue
+
+        s = re.sub(r"[,:;|/\\\-–—]+", " ", str(raw))
+        s = re.sub(r"\s+", " ", s).strip(" .–—,:;")
+
+        low = s.lower()
+        for p in leading_phrases:
+            if low.startswith(p + " "):
+                s = s[len(p) + 1:]
+                low = s.lower()
+                break
+
+        tokens = low.split()
+        while tokens and tokens[-1] in trailing_stops:
+            tokens.pop()
+        if not tokens:
+            continue
+
+        tokens = tokens[:3]
+        phrase = " ".join(tokens)
+        phrase = re.sub(r"\s+", " ", phrase).strip()
+        phrase = re.sub(r"\b(?:and|of|in|to|with|at|for|on|by|the)\s*$", "", phrase, flags=re.I).strip()
+        if not phrase:
+            continue
+
+        cleaned.append(preserve_acronyms(phrase))
+
+    seen = set()
+    out = []
+    for c in cleaned:
+        key = c.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out
+
 # Function for post-processing the parsed JSON
 def post_process_json(parsed_json):
     # Fix dates in education
@@ -133,6 +248,13 @@ def post_process_json(parsed_json):
     parsed_json["total_work_experience"] = round(total_exp, 2)
     # Add formatted total work experience
     parsed_json["formatted_total_experience"] = format_experience(parsed_json["total_work_experience"])
+
+    # Refine skills to 1-3 words per entry
+
+    for field in ["skills", "key_responsibilities"]:
+        if field in parsed_json and isinstance(parsed_json[field], list):
+            parsed_json[field] = refine_skills(parsed_json[field])
+    
 
     # Clean Unicode in degrees/etc.
     for key in ["full_name", "profile_title", "latest_company_name", "industry", "department"]:
@@ -217,21 +339,26 @@ Resume Text:
             raw_response = completion.choices[0].message.content
         
         # Clean the response to extract valid JSON
-        json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
-        if json_match:
-            result = json_match.group(0)
-            # Try to fix common syntax errors before loading
-            result = re.sub(r'(\w+):', r'"\1":', result)  # Add quotes to keys
-            result = re.sub(r',\s*([}\]])', r'\1', result)  # Remove trailing commas
-            try:
-                parsed_json = json.loads(result)
-                # Apply post-processing
-                parsed_json = post_process_json(parsed_json)
-            except json.JSONDecodeError as e:
-                st.error(f"Invalid JSON format: {str(e)}. Raw response: {result}")
-                raise
-        else:
+        candidate = extract_json_block(raw_response)
+        if not candidate and "```" in raw_response:
+            # if the model wrapped it in code fences, try inside the first fence
+            fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", raw_response, flags=re.DOTALL)
+            candidate = fenced[0] if fenced else None
+
+        if not candidate:
+            st.error("No valid JSON block found in the response.")
+            st.code(raw_response)
             raise ValueError("No valid JSON found in the response")
+
+        candidate = strip_trailing_commas(candidate)
+
+        try:
+            parsed_json = json.loads(candidate)
+            parsed_json = post_process_json(parsed_json)
+        except json.JSONDecodeError as e:
+            st.error(f"Invalid JSON format: {e}")
+            st.code(candidate, language="json")
+            raise
         
         # Display results
         st.subheader("Extracted Details")
