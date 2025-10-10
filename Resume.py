@@ -13,7 +13,35 @@ import pytesseract
 import io
 import calendar
 
-# >>> Add helpers here (Part 1) <<<
+def count_real_images(uploaded_file):
+    """Return number of real images (ignoring small decorative ones)."""
+    import pdfplumber
+    from docx import Document
+
+    ext = uploaded_file.name.lower().split('.')[-1]
+    image_count = 0
+
+    if ext == "pdf":
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page in pdf.pages:
+                for img in page.images:
+                    # Filter small or layout elements
+                    if img["width"] > 100 and img["height"] > 100:
+                        image_count += 1
+
+    elif ext == "docx":
+        doc = Document(uploaded_file)
+        for shape in doc.inline_shapes:
+            try:
+                width_cm = shape.width / 360000
+                height_cm = shape.height / 360000
+                if width_cm > 2 or height_cm > 2:
+                    image_count += 1
+            except Exception:
+                continue
+
+    return image_count
+
 def extract_json_block(text: str):
     start = text.find("{")
     if start == -1:
@@ -86,12 +114,16 @@ client = OpenAI(
 
 # Function to extract text from PDF or DOCX
 
-
 def extract_text(uploaded_file):
     text = ""
     ocr_used = False
 
-    # Step 1: Try standard text extraction
+    # Step 1️⃣ — Count real images first
+    real_image_count = count_real_images(uploaded_file)
+    has_real_images = real_image_count > 0
+    st.write(f"🖼️ Detected {real_image_count} potential real image(s) in resume")
+
+    # Step 2️⃣ — Extract normal text
     if uploaded_file.name.lower().endswith('.pdf'):
         try:
             with pdfplumber.open(uploaded_file) as pdf:
@@ -99,71 +131,65 @@ def extract_text(uploaded_file):
                     page_text = page.extract_text() or ""
                     text += "\n" + page_text.strip()
         except Exception as e:
-            print(f"PDF text extraction failed: {str(e)}")
+            st.warning(f"PDF text extraction failed: {e}")
+
     elif uploaded_file.name.lower().endswith('.docx'):
         try:
             doc = Document(uploaded_file)
             text = "\n".join(para.text for para in doc.paragraphs)
         except Exception as e:
-            print(f"DOCX text extraction failed: {str(e)}")
-    else:
-        raise ValueError("Unsupported file format. Please upload PDF or DOCX.")
+            st.warning(f"DOCX text extraction failed: {e}")
 
     text = text.strip()
 
-    # Step 2: Check if text is insufficient
-    key_sections = ["experience", "education", "skills"]
-    is_insufficient = (len(text) < 250 or not any(section in text.lower() for section in key_sections))
-
-    # Step 3: Apply OCR if needed
-    if is_insufficient:
+    # Step 3️⃣ — Trigger OCR if real images exist or text seems empty
+    if has_real_images or len(text) < 100:
         ocr_used = True
+        st.info("🔍 Performing OCR for image-based text...")
         ocr_text = ""
-        uploaded_file.seek(0)  # Reset file pointer
+
+        uploaded_file.seek(0)
         if uploaded_file.name.lower().endswith('.pdf'):
             try:
                 with pdfplumber.open(uploaded_file) as pdf:
                     for i, page in enumerate(pdf.pages):
-                        # Extract images from the page
-                        images = page.images
-                        for j, img in enumerate(images):
-                            try:
-                                # Get image stream
-                                img_stream = img["stream"].get_data()
-                                if not img_stream:
-                                    print(f"Page {i+1}, Image {j+1}: Empty image stream")
-                                    continue
-                                # Verify image format
+                        for j, img in enumerate(page.images):
+                            if img["width"] > 100 and img["height"] > 100:
                                 try:
+                                    img_stream = img["stream"].get_data()
                                     pil_img = Image.open(io.BytesIO(img_stream))
-                                    pil_img.verify()  # Verify image integrity
-                                    pil_img = Image.open(io.BytesIO(img_stream))  # Reopen after verify
-                                    ocr_text += f"\nPage {i+1} Image {j+1} Text: {pytesseract.image_to_string(pil_img, lang='eng+hin')}"
+                                    text_from_img = pytesseract.image_to_string(pil_img, lang='eng+hin')
+                                    if text_from_img.strip():
+                                        ocr_text += f"\nPage {i+1} Image {j+1} Text: {text_from_img.strip()}"
                                 except Exception as e:
-                                    print(f"Page {i+1}, Image {j+1}: Failed to process image - {str(e)}")
-                            except Exception as e:
-                                print(f"Page {i+1}, Image {j+1}: Image extraction failed - {str(e)}")
+                                    print(f"OCR failed for image {i+1}-{j+1}: {e}")
             except Exception as e:
-                print(f"PDF OCR failed: {str(e)}")
+                st.warning(f"OCR process failed for PDF: {e}")
+
         elif uploaded_file.name.lower().endswith('.docx'):
             try:
                 doc = Document(uploaded_file)
                 for j, shape in enumerate(doc.inline_shapes):
-                    if shape.has_image:
+                    width_cm = shape.width / 360000
+                    height_cm = shape.height / 360000
+                    if width_cm > 2 or height_cm > 2:
                         try:
-                            img_bytes = shape._inline.graphic.graphicData.pic.blipFill.blip.embed
-                            img_stream = doc.part.related_parts[img_bytes].blob
+                            img_rel = shape._inline.graphic.graphicData.pic.blipFill.blip.embed
+                            img_stream = doc.part.related_parts[img_rel].blob
                             pil_img = Image.open(io.BytesIO(img_stream))
-                            pil_img.verify()  # Verify image integrity
-                            pil_img = Image.open(io.BytesIO(img_stream))  # Reopen after verify
-                            ocr_text += f"\nImage {j+1} Text: {pytesseract.image_to_string(pil_img, lang='eng+hin')}"
+                            text_from_img = pytesseract.image_to_string(pil_img, lang='eng+hin')
+                            if text_from_img.strip():
+                                ocr_text += f"\nImage {j+1} Text: {text_from_img.strip()}"
                         except Exception as e:
-                            print(f"DOCX Image {j+1}: Failed to process image - {str(e)}")
+                            print(f"OCR failed for DOCX image {j+1}: {e}")
             except Exception as e:
-                print(f"DOCX OCR failed: {str(e)}")
+                st.warning(f"OCR process failed for DOCX: {e}")
+
         text += "\n" + ocr_text.strip()
 
     return text.strip(), ocr_used
+
+
 
 # Function to normalize and validate date (returns "dd-mm-yyyy" or "")
 def normalize_date(date_str):
